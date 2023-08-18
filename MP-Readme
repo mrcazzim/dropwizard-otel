@@ -1,0 +1,121 @@
+This project is in home/repos/dropwizard
+
+Pre-requisites: Git, Java SDK , Maven, and Docker installed
+	
+	1. Get app package and deployed: followed instructions on page 55 of Otel book to:
+		a. Clone dropwizard repo
+		git clone https://github.com/dropwizard/dropwizard.git --branch v2.1.1 --single-branch
+		
+		b. Change to dropwizard folder, use Maven to package the app (Maven is the Java package manager, like npm for Java Script)
+		./mvnw -Dmaven.test.skip=true package
+		
+		c. Prepare an H2 database (an open source Java relational database)
+		java -jar target/dropwizard-example-2.1.1.jar db migrate example.yml
+		
+		d. Run the application (simple message available on http://localhost:8080/hello-world
+		java -jar target/dropwizard-example-2.1.1.jar server example.yml
+		
+	2. Created docker-compose.yml (see below)
+		a. Tells docker to get jaeger, prometheus and otel-collector images, config and deploy them as containers
+		
+	3. Created otel-collector.yml (see below)
+		a. Configs the otel collector: defines ports and config collector to export traces to jaeger and metrics to Prometheus
+	
+	4. Tell docker to create our stack (all running except Java app instrumentation to export telemetry to the collector)
+		a. Run docker compose up
+		Docker compose up
+		
+		b. At this point, we have the Java app running, the otel collector, jaeger and prometheus deployed as backends
+		c. But the Java app still needs to be instrumented to export telemetry to the collector via OTLP
+	
+	5. Instrument: download the OTEL Java agent and restart the app
+		a. curl the Java agent from github into the app folder
+		curl -o ./opentelemetry-javaagent.jar \-L https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v1.21.0/opentelemetry-javaagent.jar
+		
+		b. Restart the app with the otel.service,name system property
+		java -javaagent:opentelemetry-javaagent.jar -Dotel.service.name=dropwizard-example -jar target/dropwizard-example-2.1.1.jar server example.yml
+	
+	6. Post some data to store in the database, which will be auto-instrumented
+		a. Used a curl POST to add a record with a name and a title (nice, via curl!)
+		curl -H "Content-Type: application/json" -X POST -d '{"fullName":"Other Person", "jobTitle":"Other title"}' http://localhost:8080/people
+		
+		b. Verify in browser that it was saved
+		http://localhost:8080/people
+		
+		c. This operation was automatically instrumented!
+	
+	7. Visualise auto-instrumentation down to DB calls as traces in Jaeger
+		a. Open jaeger in port 16686, select dropwizzard service and see all operations that were auto-instrumented!
+		b. Select the 'people' operation and navigate to one of the traces, see down to DB calls!
+	
+	8. Visualise metrics in Prometheus
+		a. Open prometheus in port 9090
+		
+		
+		
+Docker-compose.yml
+	version: '3'
+	
+	services:
+	  jaeger:
+	    image: jaegertracing/all-in-one:1.37.0
+	    ports:
+	      - "16686:16686"
+	      - "14250"
+	 
+	 prometheus:
+	    image: prom/prometheus:v2.38.0
+	    command: 
+	      - --web.enable-remote-write-receiver
+	    volumes:
+	      - /dev/null:/prometheus/prometheus.yml
+	    ports:
+	      - "9090:9090"
+	  
+	 otel-collector:
+	    image: otel/opentelemetry-collector-contrib:0.68.0
+	    command: 
+	      - --config=/etc/otel-collector.yml
+	    volumes:
+	      - ./otel-collector.yml:/etc/otel-collector.yml
+	    ports:
+	      - "4317:4317"
+	    depends_on:
+	      - jaeger
+	      - prometheus
+
+otel-collector.yml
+	
+	receivers:
+	  otlp:
+	    protocols:
+	      grpc:
+	
+	processors:
+	  batch:
+	
+	exporters:
+	  jaeger:
+	    endpoint: jaeger:14250
+	    tls:
+	      insecure: true
+	  prometheusremotewrite:
+	    endpoint: http://prometheus:9090/api/v1/write
+	  logging:
+	    verbosity: detailed
+	
+	service:
+	  pipelines:
+	    traces:
+	      receivers: [otlp]
+	      processors: [batch]
+	      exporters: [jaeger]
+	    metrics:
+	      receivers: [otlp]
+	      processors: [batch]
+	      exporters: [prometheusremotewrite]
+	    logs:
+	      receivers: [otlp]
+	      processors: [batch]
+	      exporters: [logging]
+	
